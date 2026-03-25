@@ -1,478 +1,515 @@
 # 技术规格文档（Tech Spec）
 
 > Technical Specification — EasyTransfer
-> 版本：0.1.0 | 最后更新：2026-03-25
+> 版本：0.2.0 | 最后更新：2026-03-25
 
 ---
 
 ## 1. 系统总览
 
-EasyTransfer 由两个对称的 Agent 程序组成，分别运行在旧电脑（源端）和新电脑（目标端）。两个 Agent 通过局域网通信，协作完成迁移任务。
+### 1.1 产品形态
+
+EasyTransfer 以两种形态存在：
 
 ```
-┌─────────────────────┐          ┌─────────────────────┐
-│    源端（旧电脑）      │          │    目标端（新电脑）    │
-│                     │          │                     │
-│  ┌───────────────┐  │  gRPC +  │  ┌───────────────┐  │
-│  │  EasyTransfer  │←─┼──TLS────┼─→│  EasyTransfer  │  │
-│  │  Source Agent  │  │         │  │  Target Agent  │  │
-│  └───────┬───────┘  │         │  └───────┬───────┘  │
-│          │          │         │          │          │
-│  ┌───────▼───────┐  │         │  ┌───────▼───────┐  │
-│  │  Scanner 模块  │  │  文件流   │  │  Executor 模块 │  │
-│  │  Collector 模块 │←─┼─────────┼─→│  Installer 模块│  │
-│  │  Packager 模块  │  │         │  │  Verifier 模块 │  │
-│  └───────────────┘  │         │  └───────────────┘  │
-└─────────────────────┘          └─────────────────────┘
+形态 1：MCP Server（主要形态）
+  → 作为 AI Agent 的技能包运行
+  → Agent 通过 MCP 协议调用我们的工具
+  → 用户通过自然语言与 Agent 交互
+
+形态 2：单文件恢复器（辅助形态）
+  → 一个独立的 .exe 文件（<50MB）
+  → 用于新电脑上无 Agent 时快速恢复
+  → 输入迁移码即可自动恢复
+  → 恢复完成后可选安装 Agent + 技能
+```
+
+### 1.2 整体架构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    用户的 AI Agent                           │
+│              (OpenClaw / Claude Desktop / etc.)              │
+│                                                             │
+│  用户说："帮我准备换机"                                        │
+│  Agent："好的，我来调用 EasyTransfer..."                       │
+└──────────────────────┬──────────────────────────────────────┘
+                       │ MCP 协议
+                       ▼
+┌─────────────────────────────────────────────────────────────┐
+│              EasyTransfer MCP Server                         │
+│                                                             │
+│  ┌──────────┐ ┌──────────┐ ┌───────────┐ ┌──────────┐      │
+│  │  scan     │ │ analyze  │ │  package  │ │ restore  │ ...  │
+│  │  _environ │ │ _migra   │ │  _migra   │ │ _from    │      │
+│  │  ment     │ │ tion     │ │  tion     │ │ _package │      │
+│  └─────┬─────┘ └─────┬────┘ └─────┬─────┘ └────┬─────┘      │
+│        │             │            │             │            │
+│  ┌─────▼─────────────▼────────────▼─────────────▼─────┐      │
+│  │              Core Engine                            │      │
+│  │  Scanner │ Planner │ Packager │ Executor │ Verifier │      │
+│  └─────────────────────────────────────────────────────┘      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 1.3 两种迁移流程
+
+```
+流程 A：迁移码模式（MVP，推荐）
+
+  旧电脑                         云端/U盘                    新电脑
+  ┌──────────┐                 ┌─────────┐              ┌──────────────┐
+  │ Agent +   │  加密迁移包     │ 临时存储  │  迁移码下载   │ 单文件恢复器  │
+  │ EasyTrans │ ──────────────→│ (加密的)  │─────────────→│ 或 Agent +   │
+  │ fer 技能   │                │          │              │ EasyTransfer │
+  └──────────┘                 └─────────┘              └──────────────┘
+      ↑                                                       ↑
+  用户说一句话                                            输入 6 位迁移码
+
+流程 B：局域网直连模式（未来增强）
+
+  旧电脑                                              新电脑
+  ┌──────────┐         局域网 P2P                  ┌──────────┐
+  │ Agent +   │ ←────── 加密直连 ──────────────→    │ Agent +   │
+  │ EasyTrans │                                    │ EasyTrans │
+  │ fer 技能   │                                    │ fer 技能   │
+  └──────────┘                                     └──────────┘
 ```
 
 ---
 
-## 2. 模块详细设计
+## 2. MCP Server 设计
 
-### 2.1 设备发现与配对模块（Discovery）
+### 2.1 MCP 工具定义
 
-**职责**：让同一局域网内的两台电脑互相发现并建立安全连接。
-
-**技术方案**：
-
-```
-发现阶段：
-  - 使用 mDNS（Multicast DNS）在局域网广播自己的存在
-  - 服务名称：_easytransfer._tcp.local
-  - 广播内容：设备名称、角色（source/target）、版本号
-
-配对阶段：
-  1. Target 端发现 Source 端后，显示 6 位配对码
-  2. 用户在 Source 端输入相同的配对码
-  3. 两端使用 SRP（Secure Remote Password）协议验证配对码
-  4. 配对成功后，使用 TLS 1.3 建立加密通道
-  5. 后续所有通信走此加密通道
-
-备选方案（无法 mDNS 时）：
-  - 用户手动输入对方的 IP 地址
-```
-
-**关键接口**：
+这是我们暴露给 Agent 的工具接口，也是产品的"API"：
 
 ```python
-class DiscoveryService:
-    async def start_broadcasting(self, role: str) -> None:
-        """开始在局域网广播自己的存在"""
+# MCP Tool 1: scan_environment
+@mcp_tool(
+    name="scan_environment",
+    description="扫描当前 Windows 电脑的完整软件环境，包括已安装应用、"
+                "用户文件、浏览器数据、开发环境、系统配置等。"
+                "返回结构化的环境画像。通常需要 1-5 分钟。"
+)
+async def scan_environment(
+    scope: str = "full",         # "full" | "apps_only" | "files_only" | "dev_only"
+    include_file_sizes: bool = True,
+    skip_system_apps: bool = True,
+) -> EnvironmentProfile:
+    """扫描环境并返回画像"""
+    pass
 
-    async def discover_peers(self) -> list[PeerInfo]:
-        """发现局域网内的其他 EasyTransfer 实例"""
 
-    async def pair_with_peer(self, peer: PeerInfo, pairing_code: str) -> SecureChannel:
-        """与指定 peer 进行配对，返回加密通道"""
+# MCP Tool 2: analyze_migration
+@mcp_tool(
+    name="analyze_migration",
+    description="分析环境画像，返回人类可读的迁移报告。"
+                "告诉用户有多少应用可以自动迁移、多少需要手动处理、"
+                "总数据量是多少等。这个工具很快，几秒钟就能完成。"
+)
+async def analyze_migration(
+    profile_path: str,           # 环境画像 JSON 文件路径
+) -> MigrationAnalysis:
+    """分析并生成迁移报告"""
+    pass
+
+
+# MCP Tool 3: create_migration_package
+@mcp_tool(
+    name="create_migration_package",
+    description="根据用户确认的迁移选项，将需要迁移的数据打包为加密的迁移包。"
+                "生成一个 6 位迁移码，用于在新电脑上恢复。"
+                "耗时取决于数据量。"
+)
+async def create_migration_package(
+    profile_path: str,           # 环境画像 JSON 文件路径
+    include_apps: list[str] | None = None,    # 要迁移的应用列表（None=全部）
+    include_files: bool = True,
+    include_browser: bool = True,
+    include_dev_env: bool = True,
+    include_credentials: bool = False,         # 默认不迁移凭证，需用户明确同意
+    output_mode: str = "cloud",  # "cloud"（上传到中转服务器）| "local"（保存到本地/U盘）
+    output_path: str | None = None,  # output_mode="local" 时，保存路径
+) -> MigrationPackageInfo:
+    """打包迁移数据"""
+    pass
+
+
+# MCP Tool 4: restore_from_package
+@mcp_tool(
+    name="restore_from_package",
+    description="从迁移包恢复环境到当前电脑。可以通过迁移码从云端下载，"
+                "或从本地文件恢复。会自动安装应用、恢复配置、传输文件。"
+                "过程中会报告进度。"
+)
+async def restore_from_package(
+    migration_code: str | None = None,   # 6 位迁移码（云端模式）
+    package_path: str | None = None,     # 本地迁移包路径
+    auto_install_apps: bool = True,
+    restore_files: bool = True,
+    restore_configs: bool = True,
+) -> MigrationResult:
+    """从迁移包恢复"""
+    pass
+
+
+# MCP Tool 5: verify_migration
+@mcp_tool(
+    name="verify_migration",
+    description="验证迁移结果。检查应用是否安装成功、配置是否生效、"
+                "文件是否完整。返回详细的验证报告。"
+)
+async def verify_migration(
+    migration_id: str,           # 迁移记录 ID
+) -> VerificationReport:
+    """验证迁移结果"""
+    pass
+
+
+# MCP Tool 6: rollback_migration
+@mcp_tool(
+    name="rollback_migration",
+    description="回滚指定的迁移操作。可以回滚单个应用安装或全部迁移。"
+)
+async def rollback_migration(
+    migration_id: str,
+    item_ids: list[str] | None = None,  # None = 回滚全部
+) -> RollbackResult:
+    """回滚迁移"""
+    pass
+```
+
+### 2.2 MCP Server 启动方式
+
+```python
+# 作为 MCP Server 运行
+# 用户的 Agent 通过以下方式启动我们的技能：
+
+# 方式 1：npx（推荐，无需预装 Python）
+# npx easytransfer-mcp
+
+# 方式 2：pip 安装后运行
+# pip install easytransfer
+# python -m easytransfer.mcp_server
+
+# 方式 3：Agent 平台的技能商店一键安装
+# （未来，当技能商店成熟后）
+```
+
+### 2.3 MCP 配置文件
+
+用户在 Agent 配置中添加我们的技能：
+
+```json
+{
+  "mcpServers": {
+    "easytransfer": {
+      "command": "npx",
+      "args": ["easytransfer-mcp"],
+      "env": {
+        "EASYTRANSFER_LICENSE": "用户的许可证密钥（付费后获得）"
+      }
+    }
+  }
+}
 ```
 
 ---
 
-### 2.2 环境扫描模块（Scanner）
+## 3. 核心模块设计
 
-**职责**：扫描旧电脑的完整软件环境，生成结构化的环境画像。
+### 3.1 环境扫描模块（Scanner）
 
-**设计理念**：采用插件式架构，每种扫描任务是一个独立的 Scanner 插件，方便扩展。
+**设计理念**：插件式架构，每种扫描任务是一个独立的 Scanner 插件。
 
 ```python
-# 扫描器基类
 class BaseScanner:
-    name: str                    # 扫描器名称
-    description: str             # 描述（给 AI Agent 看的）
-    priority: int                # 优先级（P0/P1/P2）
+    """扫描器基类"""
+    name: str
+    description: str
+    priority: int                # P0/P1/P2
 
     async def scan(self) -> ScanResult:
-        """执行扫描，返回结构化结果"""
         raise NotImplementedError
 
     async def estimate_size(self) -> int:
-        """估算此项迁移需要传输的数据量（字节）"""
+        """估算迁移数据量（字节）"""
         raise NotImplementedError
 ```
 
-**已规划的扫描器列表**：
+**扫描器列表**：
 
 | 扫描器 | 类名 | 数据来源 | 优先级 |
 |--------|------|---------|--------|
 | 已安装应用 | InstalledAppScanner | 注册表 + winget + Program Files | P0 |
 | 应用配置 | AppConfigScanner | AppData/各应用配置目录 | P0 |
-| 用户文件 | UserFileScanner | 用户目录（Documents/Desktop/Downloads等） | P0 |
-| 浏览器数据 | BrowserScanner | Chrome/Edge/Firefox 的 Profile 目录 | P0 |
-| 开发环境 | DevEnvScanner | PATH 中的运行时、包管理器 | P0 |
+| 用户文件 | UserFileScanner | 用户目录 | P0 |
+| 浏览器数据 | BrowserScanner | Chrome/Edge/Firefox Profile | P0 |
+| 开发环境 | DevEnvScanner | PATH 中的运行时 | P0 |
 | Git/SSH | GitSshScanner | ~/.gitconfig, ~/.ssh/ | P0 |
 | 系统设置 | SystemSettingsScanner | 注册表、系统API | P1 |
-| 网络配置 | NetworkConfigScanner | netsh 输出、VPN 配置 | P1 |
-| 终端配置 | TerminalConfigScanner | Windows Terminal settings.json, PS profile | P1 |
-| 字体 | FontScanner | C:\Windows\Fonts（用户安装的） | P2 |
-| 计划任务 | ScheduledTaskScanner | schtasks 输出 | P2 |
+| 网络配置 | NetworkConfigScanner | netsh、VPN 配置 | P1 |
+| 终端配置 | TerminalConfigScanner | Windows Terminal, PS profile | P1 |
+| 字体 | FontScanner | 用户安装的字体 | P2 |
+| 计划任务 | ScheduledTaskScanner | schtasks | P2 |
 
-**环境画像数据结构**：
+### 3.2 核心数据模型
 
 ```python
 @dataclass
 class EnvironmentProfile:
     """一台电脑的完整环境画像"""
+    profile_id: str                     # 唯一标识
     scan_time: datetime
-    system_info: SystemInfo            # OS 版本、架构、计算机名等
-    installed_apps: list[AppInfo]      # 已安装应用列表
-    app_configs: list[ConfigInfo]      # 应用配置信息
-    user_files: list[FileGroup]        # 用户文件（按类别分组）
-    browser_profiles: list[BrowserProfile]  # 浏览器数据
-    dev_environments: list[DevEnvInfo]      # 开发环境
-    credentials: list[CredentialInfo]       # 凭证信息（仅元数据，不含实际密码）
-    system_settings: dict                   # 系统配置
-    network_config: NetworkConfig           # 网络配置
-    total_size_bytes: int                   # 总数据量
+    system_info: SystemInfo
+    installed_apps: list[AppInfo]
+    app_configs: list[ConfigInfo]
+    user_files: list[FileGroup]
+    browser_profiles: list[BrowserProfile]
+    dev_environments: list[DevEnvInfo]
+    credentials: list[CredentialInfo]   # 仅元数据
+    system_settings: dict
+    total_size_bytes: int
 
 @dataclass
 class AppInfo:
     """单个应用的信息"""
-    name: str                          # 应用名称
-    version: str                       # 版本号
-    publisher: str                     # 发布者
-    install_path: str                  # 安装路径
-    install_source: str                # 安装来源（winget/msi/exe/portable/store）
-    winget_id: str | None              # winget 包 ID（如果可用）
-    config_paths: list[str]            # 配置文件路径列表
-    data_paths: list[str]              # 数据文件路径列表
-    size_bytes: int                    # 占用空间
-    last_used: datetime | None         # 最后使用时间
-    can_auto_install: bool             # 是否支持自动安装
-    install_command: str | None        # 自动安装命令（如果支持）
-    notes: str                         # AI Agent 的备注（如兼容性说明）
-```
-
----
-
-### 2.3 AI 迁移规划模块（Planner）
-
-**职责**：基于环境画像，利用 AI Agent 生成智能迁移计划。
-
-**这是产品的核心智能所在。** 传统迁移工具只能机械复制，而我们的 Planner 能"理解"用户的环境并做出合理决策。
-
-**AI Agent 在此模块的职责**：
-
-```
-输入：源端环境画像（EnvironmentProfile）+ 目标端系统信息（SystemInfo）
-
-AI Agent 需要做出的决策：
-  1. 每个应用的最佳安装方式是什么？
-     - 优先 winget → 其次静默安装 → 最后给出手动指引
-  2. 哪些应用建议不迁移？（过旧、已弃用、临时安装的）
-  3. 应用配置如何迁移？（直接复制 vs 需要转换 vs 建议使用云同步）
-  4. 文件迁移策略：哪些文件跳过？（node_modules, .venv, __pycache__ 等）
-  5. 凭证迁移的安全建议
-  6. 识别潜在的兼容性问题
-
-输出：MigrationPlan（用户可审核的迁移计划）
-```
-
-**迁移计划数据结构**：
-
-```python
-@dataclass
-class MigrationPlan:
-    """AI Agent 生成的迁移计划"""
-    plan_id: str
-    created_at: datetime
-    source_profile: EnvironmentProfile
-    target_system_info: SystemInfo
-
-    # 迁移项列表，按执行顺序排列
-    items: list[MigrationItem]
-
-    # 需要用户决策的问题
-    user_decisions: list[UserDecision]
-
-    # 预估信息
-    estimated_transfer_size: int       # 预估传输数据量
-    estimated_duration_minutes: int    # 预估耗时
-    estimated_steps: int               # 总步骤数
+    name: str
+    version: str
+    publisher: str
+    install_path: str
+    install_source: str                 # winget/msi/exe/portable/store
+    winget_id: str | None
+    config_paths: list[str]
+    data_paths: list[str]
+    size_bytes: int
+    last_used: datetime | None
+    can_auto_install: bool
+    install_command: str | None
+    notes: str
 
 @dataclass
-class MigrationItem:
-    """单个迁移项"""
-    id: str
-    category: str                      # app_install / config_restore / file_transfer / credential / system_setting
-    name: str                          # 显示名称
-    description: str                   # 描述（给用户看的）
-    priority: int                      # 执行优先级
-    status: str                        # pending / approved / rejected / running / success / failed / skipped
-    action: MigrationAction            # 具体执行动作
-    rollback_action: MigrationAction | None  # 回滚动作
-    dependencies: list[str]            # 依赖的其他 MigrationItem ID
-    risk_level: str                    # low / medium / high
-    requires_confirmation: bool        # 是否需要用户逐项确认
-    ai_notes: str                      # AI Agent 的说明
+class MigrationPackageInfo:
+    """迁移包信息"""
+    package_id: str
+    migration_code: str                 # 6 位迁移码
+    package_size_bytes: int
+    item_count: int
+    storage_mode: str                   # cloud / local
+    storage_path: str                   # 云端 URL 或本地路径
+    expires_at: datetime                # 过期时间（24小时）
+    encryption_info: str                # 加密方式说明
 
 @dataclass
-class MigrationAction:
-    """迁移动作（具体要执行的操作）"""
-    action_type: str                   # winget_install / file_copy / config_restore / registry_write / command_run
-    params: dict                       # 动作参数
-    verify_command: str | None         # 验证命令（执行后检查是否成功）
+class MigrationResult:
+    """迁移执行结果"""
+    migration_id: str
+    started_at: datetime
+    completed_at: datetime
+    total_items: int
+    success_count: int
+    failed_count: int
+    skipped_count: int
+    items: list[MigrationItemResult]
+    manual_actions: list[str]           # 需要用户手动处理的事项
 ```
 
----
-
-### 2.4 数据传输模块（Transfer）
-
-**职责**：在源端和目标端之间安全、高效地传输数据。
-
-**传输协议设计**：
+### 3.3 迁移包格式
 
 ```
-传输层架构：
+迁移包结构（.etpkg 文件，本质上是加密的 tar.gz）：
 
-  ┌─────────────────────────────────────┐
-  │         应用层（迁移逻辑）            │
-  ├─────────────────────────────────────┤
-  │         控制通道（gRPC + TLS）        │  ← 命令、状态同步、小数据
-  ├─────────────────────────────────────┤
-  │         数据通道（TCP + TLS）         │  ← 大文件流式传输
-  ├─────────────────────────────────────┤
-  │         加密层（TLS 1.3）            │
-  ├─────────────────────────────────────┤
-  │         传输层（TCP）                │
-  └─────────────────────────────────────┘
+migration_package.etpkg
+├── manifest.json              # 迁移清单（包含所有元数据）
+├── apps/                      # 应用配置数据
+│   ├── vscode/
+│   │   ├── settings.json
+│   │   ├── keybindings.json
+│   │   └── extensions.json    # 扩展列表（不含扩展本身，到目标端重新安装）
+│   ├── chrome/
+│   │   ├── bookmarks.json
+│   │   ├── extensions.json
+│   │   └── local_state
+│   └── ...
+├── files/                     # 用户文件
+│   ├── documents/
+│   ├── desktop/
+│   └── ...
+├── dev/                       # 开发环境配置
+│   ├── gitconfig
+│   ├── ssh/                   # 加密的 SSH 密钥
+│   ├── pip_packages.txt       # pip freeze 输出
+│   ├── npm_global.txt         # npm list -g 输出
+│   └── ...
+├── system/                    # 系统配置
+│   ├── env_variables.json
+│   ├── hosts
+│   ├── terminal_settings.json
+│   └── ...
+└── install_plan.json          # 自动生成的安装计划
+                               # （在目标端恢复时，Executor 按此执行）
 ```
 
-**关键设计决策**：
-
-1. **控制通道和数据通道分离**
-   - 控制通道：用 gRPC，传输命令、状态、迁移计划等结构化数据
-   - 数据通道：用原始 TCP 流，传输文件内容（避免 gRPC 的消息大小限制）
-
-2. **文件传输策略**
-   ```
-   小文件（< 1MB）：打包成 tar.gz 批量传输
-   大文件（≥ 1MB）：单独传输，支持断点续传
-   所有文件：传输前计算 SHA-256，传输后校验
-   ```
-
-3. **断点续传**
-   ```
-   传输状态文件：~/.easytransfer/transfer_state.json
-   记录每个文件的传输进度（已传输字节数）
-   中断后恢复时，从上次位置继续
-   ```
-
----
-
-### 2.5 执行引擎模块（Executor）
-
-**职责**：在目标端按照迁移计划执行具体操作。
-
-**执行流程**：
-
-```
-For each MigrationItem in plan (按优先级和依赖关系排序):
-  1. 检查依赖项是否已完成
-  2. 如果 requires_confirmation，等待用户确认
-  3. 记录当前状态（用于回滚）
-  4. 执行 action
-  5. 执行 verify_command 验证结果
-  6. 如果失败：
-     a. AI Agent 分析失败原因
-     b. 如果能自动修复：尝试修复后重试（最多 2 次）
-     c. 如果不能修复：标记为 failed，记录原因，继续下一项
-  7. 更新状态
-  8. 报告进度
-```
-
-**执行器类型**：
+### 3.4 打包与加密
 
 ```python
-class WingetInstaller:
-    """使用 winget 安装应用"""
-    async def install(self, winget_id: str, version: str = None) -> InstallResult:
-        # winget install --id {winget_id} --version {version} --accept-source-agreements --accept-package-agreements
-        pass
+class MigrationPackager:
+    """迁移包打包器"""
 
-class FileRestorer:
-    """将文件恢复到目标位置"""
-    async def restore(self, source_path: str, target_path: str) -> RestoreResult:
-        # 复制文件，保留权限和时间戳
-        pass
-
-class ConfigRestorer:
-    """恢复应用配置文件"""
-    async def restore(self, config_info: ConfigInfo) -> RestoreResult:
-        # 将配置文件复制到正确位置
-        # 如果目标位置已有配置，备份后覆盖
-        pass
-
-class RegistryWriter:
-    """写入注册表项"""
-    async def write(self, key: str, value_name: str, value: any) -> WriteResult:
-        # 写入前备份原值（用于回滚）
-        pass
-
-class CommandRunner:
-    """执行任意命令"""
-    async def run(self, command: str, timeout: int = 300) -> RunResult:
-        # 用于执行自定义安装脚本等
+    async def create_package(
+        self,
+        profile: EnvironmentProfile,
+        options: PackageOptions,
+    ) -> MigrationPackageInfo:
+        """
+        打包流程：
+        1. 根据用户选项筛选迁移项
+        2. 收集所有需要迁移的文件和配置
+        3. 生成 install_plan.json（目标端的安装指令）
+        4. 打包为 tar.gz
+        5. 生成随机迁移码（6 位数字）
+        6. 从迁移码派生加密密钥（PBKDF2）
+        7. 用 AES-256-GCM 加密整个包
+        8. 上传到中转服务器 或 保存到本地
+        """
         pass
 ```
 
----
-
-### 2.6 验证模块（Verifier）
-
-**职责**：验证每个迁移步骤的执行结果。
+### 3.5 恢复执行引擎
 
 ```python
-class MigrationVerifier:
-    """迁移结果验证器"""
+class MigrationExecutor:
+    """在目标端执行恢复"""
 
-    async def verify_app_installed(self, app_name: str) -> bool:
-        """检查应用是否已安装（通过注册表/winget list）"""
-
-    async def verify_file_integrity(self, file_path: str, expected_hash: str) -> bool:
-        """校验文件 SHA-256 哈希值"""
-
-    async def verify_config_applied(self, config_info: ConfigInfo) -> bool:
-        """检查配置文件是否存在且内容正确"""
-
-    async def verify_env_variable(self, name: str, expected_value: str) -> bool:
-        """检查环境变量是否正确设置"""
+    async def restore(self, package_path: str, key: bytes) -> MigrationResult:
+        """
+        恢复流程：
+        1. 解密迁移包
+        2. 读取 manifest.json 和 install_plan.json
+        3. 按顺序执行：
+           a. 安装应用（优先 winget，其次其他方式）
+           b. 恢复应用配置（复制到正确位置）
+           c. 恢复用户文件
+           d. 恢复系统配置（环境变量等）
+           e. 恢复开发环境（安装运行时 + 全局包）
+        4. 每步执行后验证
+        5. 生成迁移结果报告
+        """
+        pass
 ```
 
 ---
 
-## 3. 数据流
+## 4. 单文件恢复器设计
+
+**用途**：新电脑上什么都没有时，用这个小工具恢复。
 
 ```
-完整的数据流：
+技术方案：
+  - 使用 PyInstaller 打包为单个 .exe（<50MB）
+  - 内含精简版 EasyTransfer（只有 restore + verify 功能）
+  - 自带 Python 运行时（无需用户安装 Python）
 
-源端                              目标端
- │                                 │
- │  1. 扫描环境                      │
- ├──────────────┐                  │
- │  Scanner 模块  │                  │
- ├──────────────┘                  │
- │                                 │
- │  2. 生成环境画像                    │
- │  EnvironmentProfile              │
- │                                 │
- │  3. 发送画像给目标端   ────────────→ │
- │                                 │  4. 目标端收集自身 SystemInfo
- │                                 │
- │                                 │  5. AI Agent 生成迁移计划
- │                                 │     (在目标端运行，因为需要知道目标环境)
- │                                 │
- │  6. 迁移计划发回给源端  ←──────────  │
- │                                 │
- │  7. 两端都显示计划给用户审核          │
- │     用户确认后...                  │
- │                                 │
- │  8. 源端开始打包数据  ────────────→ │  9. 目标端接收并执行
- │     按 MigrationItem 逐项进行      │     安装应用 → 恢复配置 → 复制文件
- │                                 │
- │                                 │  10. 验证每一步
- │                                 │
- │  11. 迁移完成，生成报告             │
+功能：
+  - 输入 6 位迁移码
+  - 从云端下载迁移包
+  - 解密并执行恢复
+  - 显示进度和结果
+  - 可选：恢复完成后安装完整版 Agent + EasyTransfer 技能
+
+界面：
+  - 简单的命令行界面（用 rich 美化）
+  - 未来可以加 GUI（用 PySide6 或 webview）
 ```
 
 ---
 
-## 4. 安全设计
+## 5. 安全设计
 
-### 4.1 通信安全
-
-```
-配对过程：
-  1. 用户在目标端看到 6 位配对码
-  2. 在源端输入配对码
-  3. 使用 SRP 协议验证（配对码不在网络上传输）
-  4. 建立 TLS 1.3 通道（使用临时生成的证书）
-  5. 两端显示通道指纹让用户确认（防中间人）
-
-数据传输：
-  - 所有数据通过 TLS 1.3 加密通道传输
-  - 凭证类数据额外使用 AES-256-GCM 加密
-  - 加密密钥从配对码派生（PBKDF2）
-```
-
-### 4.2 凭证处理
+### 5.1 加密方案
 
 ```
-处理原则：
-  1. 凭证在源端加密，密文传输，在目标端解密
-  2. 中间过程不存储任何明文凭证到磁盘
-  3. 迁移完成后，内存中的凭证数据立即清零
-  4. SSH 私钥等高敏感数据需要用户逐项确认
-  5. 浏览器密码建议使用浏览器自带的同步功能，而非直接迁移密码数据库
+迁移码 → PBKDF2(migration_code, salt, iterations=600000) → 256-bit Key
+Key → AES-256-GCM 加密迁移包
+
+特点：
+  - 迁移码只有用户知道（不传输给服务器）
+  - 服务器存储的是加密后的数据，无法解密
+  - 即使服务器被入侵，攻击者也无法获取用户数据
+  - 迁移码 24 小时后失效，过期的迁移包自动删除
+```
+
+### 5.2 凭证特殊处理
+
+```
+SSH 密钥、GPG 密钥等高敏感数据：
+  1. 在迁移包内使用独立的二次加密
+  2. 恢复时需要用户额外确认
+  3. 恢复后立即从临时目录删除中间文件
+  4. 日志中绝不记录凭证内容
+```
+
+### 5.3 云端中转服务器
+
+```
+中转服务器职责：
+  - 临时存储加密的迁移包
+  - 根据迁移码分发迁移包
+  - 24 小时后自动删除
+
+中转服务器不能做的：
+  - 不解密任何数据
+  - 不记录用户信息
+  - 不分析迁移内容
 ```
 
 ---
 
-## 5. 错误处理策略
+## 6. 错误处理策略
 
-| 错误类型 | 处理方式 | 用户感知 |
-|---------|---------|---------|
-| 网络中断 | 自动重连（30秒超时），恢复传输 | "网络中断，正在重连..." |
-| 应用安装失败 | 记录错误，尝试备用安装方式，继续其他项 | 报告中标注该应用需手动安装 |
-| 文件传输校验失败 | 自动重传该文件（最多3次） | 用户无感知 |
-| 目标磁盘空间不足 | 暂停迁移，提示用户释放空间或跳过大文件 | 弹出空间不足提示 |
-| 权限不足 | 提示用户以管理员身份运行 | "需要管理员权限，请重新启动" |
-| AI API 调用失败 | 使用本地备用规则生成基础迁移计划 | "智能规划暂不可用，使用基础模式" |
+| 错误类型 | 处理方式 | Agent 应如何告知用户 |
+|---------|---------|-------------------|
+| 扫描某个应用失败 | 跳过该应用，记录错误 | "有 2 个应用无法识别，已跳过" |
+| 打包时磁盘空间不足 | 提示用户释放空间或选择更少迁移项 | "磁盘空间不足，建议先迁移应用配置，文件稍后用U盘拷贝" |
+| 上传中断 | 自动重试 3 次，支持断点续传 | "上传中断，正在重试..." |
+| 迁移码错误 | 返回错误，让用户重新输入 | "迁移码不正确，请确认 6 位数字" |
+| 迁移码过期 | 需要在旧电脑上重新生成 | "迁移码已过期，请在旧电脑上重新打包" |
+| 应用安装失败 | 记录失败原因，继续其他项 | "Chrome 安装成功，但 Photoshop 需要手动安装" |
+| 恢复时磁盘不足 | 暂停，提示用户 | "新电脑磁盘空间不足，已安装 30 个应用，还剩 8 个待安装" |
 
 ---
 
-## 6. 本地开发与测试环境
+## 7. 本地开发与测试环境
 
-### 6.1 虚拟机测试环境
+### 7.1 虚拟机测试环境
 
 ```
-推荐配置：
-
-宿主机要求：
-  - 16GB+ 内存（给两台 VM 各分配 4GB）
-  - 100GB+ 可用磁盘空间
-  - 支持 Hyper-V 或 VMware
-
 VM-Source（旧电脑模拟）：
   - Windows 11 Pro
   - 4GB 内存 / 60GB 磁盘
-  - 预装测试软件套装（见 scripts/setup_test_source.ps1）
-  - 内部网络连接
+  - 预装测试软件套装
+  - 可选安装 Agent
 
 VM-Target（新电脑模拟）：
-  - Windows 11 Pro（全新安装）
+  - Windows 11 Pro 全新安装
   - 4GB 内存 / 60GB 磁盘
-  - 仅默认软件
-  - 内部网络连接（与 Source 同一虚拟网络）
+  - 仅默认软件（模拟开箱状态）
 ```
 
-### 6.2 测试数据准备脚本
-
-项目中应包含以下自动化脚本：
+### 7.2 测试策略
 
 ```
-scripts/
-  setup_test_source.ps1    — 在 VM-Source 中安装一批测试软件和配置
-  setup_test_target.ps1    — 确保 VM-Target 是干净状态
-  verify_migration.ps1     — 迁移后自动验证结果是否正确
-  reset_target.ps1         — 重置 VM-Target 到初始状态（利用快照）
-```
+单元测试：
+  - 各 Scanner 的扫描逻辑
+  - 打包和解包逻辑
+  - 加密和解密
+  - 各 Executor 的安装/恢复逻辑
 
-### 6.3 自动化测试策略
+集成测试：
+  - 扫描 → 打包 → 解包 → 恢复 全流程（单机内）
+  - MCP Server 启动和工具调用
 
-```
-单元测试（tests/unit/）：
-  - 每个 Scanner 插件的测试
-  - 每个 Executor 的测试
-  - 数据结构的序列化/反序列化测试
-  - 加密/解密测试
-
-集成测试（tests/integration/）：
-  - 源端扫描 → 生成画像 → 序列化 → 反序列化 → 验证完整性
-  - 完整迁移流程（在 CI 环境中使用 mock）
-
-端到端测试（tests/e2e/）：
-  - 在两台 VM 之间执行完整迁移
-  - 验证迁移结果
-  - 需要手动或半自动触发（因为需要 VM 环境）
+端到端测试：
+  - 两台 VM 之间的完整迁移流程
 ```

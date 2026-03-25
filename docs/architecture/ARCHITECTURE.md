@@ -1,7 +1,7 @@
 # 系统架构文档
 
 > Architecture Document — EasyTransfer
-> 版本：0.1.0 | 最后更新：2026-03-25
+> 版本：0.2.0 | 最后更新：2026-03-25
 
 ---
 
@@ -9,9 +9,8 @@
 
 ```
 easytransfer/
-├── CLAUDE.md                          # AI Agent 入口文件（必读）
+├── CLAUDE.md                          # AI Agent 开发入口文件
 ├── pyproject.toml                     # Poetry 项目配置
-├── README.md                          # 项目说明
 │
 ├── docs/
 │   ├── specs/
@@ -26,8 +25,9 @@ easytransfer/
 ├── src/
 │   └── easytransfer/
 │       ├── __init__.py
-│       ├── __main__.py                # 程序入口
+│       ├── __main__.py                # 程序入口（CLI 模式）
 │       ├── cli.py                     # 命令行界面
+│       ├── mcp_server.py              # MCP Server 入口（技能模式）
 │       │
 │       ├── core/                      # 核心数据结构和工具
 │       │   ├── __init__.py
@@ -36,13 +36,12 @@ easytransfer/
 │       │   ├── logging.py             # 日志系统
 │       │   └── errors.py              # 自定义异常
 │       │
-│       ├── discovery/                 # 设备发现与配对
+│       ├── mcp/                       # MCP 协议层
 │       │   ├── __init__.py
-│       │   ├── mdns.py                # mDNS 广播和发现
-│       │   ├── pairing.py             # 配对协议
-│       │   └── secure_channel.py      # 安全通道建立
+│       │   ├── server.py              # MCP Server 实现
+│       │   └── tools.py               # MCP Tool 定义（6 个工具）
 │       │
-│       ├── scanner/                   # 环境扫描（源端使用）
+│       ├── scanner/                   # 环境扫描
 │       │   ├── __init__.py
 │       │   ├── base.py                # Scanner 基类
 │       │   ├── app_scanner.py         # 已安装应用扫描
@@ -52,64 +51,70 @@ easytransfer/
 │       │   ├── dev_env_scanner.py     # 开发环境扫描
 │       │   ├── git_ssh_scanner.py     # Git/SSH 配置扫描
 │       │   ├── system_scanner.py      # 系统设置扫描
-│       │   └── registry.py            # Scanner 注册表（管理所有扫描器）
+│       │   └── registry.py            # Scanner 注册表
 │       │
-│       ├── planner/                   # AI 迁移规划
+│       ├── planner/                   # 迁移分析与规划
 │       │   ├── __init__.py
-│       │   ├── ai_planner.py          # AI Agent 规划器（调用 Claude API）
-│       │   ├── rule_planner.py        # 基于规则的备用规划器
-│       │   ├── plan_builder.py        # 迁移计划构建器
-│       │   └── app_knowledge.py       # 应用知识库（常见应用的迁移经验）
+│       │   ├── analyzer.py            # 环境分析器
+│       │   ├── plan_builder.py        # 安装计划构建器
+│       │   └── app_knowledge.py       # 应用知识库
 │       │
-│       ├── transfer/                  # 数据传输
+│       ├── packager/                  # 迁移包打包
 │       │   ├── __init__.py
-│       │   ├── control_channel.py     # gRPC 控制通道
-│       │   ├── data_channel.py        # 文件数据通道
-│       │   ├── file_packer.py         # 文件打包（小文件合并）
+│       │   ├── packer.py              # 打包器
+│       │   ├── unpacker.py            # 解包器
+│       │   └── manifest.py            # 清单文件处理
+│       │
+│       ├── transfer/                  # 数据传输（云端中转）
+│       │   ├── __init__.py
+│       │   ├── uploader.py            # 上传到中转服务器
+│       │   ├── downloader.py          # 从中转服务器下载
 │       │   ├── checksum.py            # 哈希校验
-│       │   └── resume.py              # 断点续传状态管理
+│       │   └── resume.py              # 断点续传
 │       │
-│       ├── executor/                  # 迁移执行（目标端使用）
+│       ├── executor/                  # 迁移执行（目标端）
 │       │   ├── __init__.py
-│       │   ├── engine.py              # 执行引擎（按顺序执行 MigrationItem）
+│       │   ├── engine.py              # 执行引擎
 │       │   ├── installers/
 │       │   │   ├── __init__.py
-│       │   │   ├── winget_installer.py    # winget 安装器
-│       │   │   ├── exe_installer.py       # 静默 exe 安装器
-│       │   │   └── portable_installer.py  # 绿色软件安装器
+│       │   │   ├── winget_installer.py
+│       │   │   ├── exe_installer.py
+│       │   │   └── portable_installer.py
 │       │   ├── restorers/
 │       │   │   ├── __init__.py
-│       │   │   ├── file_restorer.py       # 文件恢复
-│       │   │   ├── config_restorer.py     # 配置恢复
-│       │   │   ├── registry_restorer.py   # 注册表恢复
-│       │   │   └── env_restorer.py        # 环境变量恢复
+│       │   │   ├── file_restorer.py
+│       │   │   ├── config_restorer.py
+│       │   │   └── env_restorer.py
 │       │   └── verifier.py            # 结果验证器
 │       │
 │       ├── report/                    # 迁移报告
 │       │   ├── __init__.py
-│       │   ├── generator.py           # 报告生成器
-│       │   └── templates/             # HTML 报告模板
-│       │       └── report.html
+│       │   └── generator.py           # 报告生成器
 │       │
-│       └── security/                  # 安全相关
+│       └── security/                  # 安全
 │           ├── __init__.py
-│           ├── crypto.py              # 加密/解密工具
-│           ├── srp.py                 # SRP 配对协议
+│           ├── crypto.py              # AES-256-GCM 加密/解密
+│           ├── key_derivation.py      # 从迁移码派生密钥（PBKDF2）
 │           └── credential_handler.py  # 凭证安全处理
 │
+├── restorer/                          # 单文件恢复器（独立构建）
+│   ├── main.py                        # 恢复器入口
+│   ├── ui.py                          # 简单 CLI 界面
+│   └── build.py                       # PyInstaller 打包脚本
+│
 ├── tests/
-│   ├── unit/                          # 单元测试
-│   ├── integration/                   # 集成测试
-│   └── e2e/                           # 端到端测试
+│   ├── unit/
+│   ├── integration/
+│   ├── e2e/
+│   └── fixtures/
 │
 ├── scripts/
 │   ├── setup_test_source.ps1          # 搭建测试源端 VM
-│   ├── setup_test_target.ps1          # 搭建测试目标端 VM
 │   ├── verify_migration.ps1           # 验证迁移结果
-│   └── reset_target.ps1              # 重置目标端 VM
+│   └── build_restorer.ps1             # 构建单文件恢复器
 │
-└── proto/
-    └── easytransfer.proto             # gRPC 协议定义文件
+└── proto/                             # 预留：未来局域网直连的协议定义
+    └── easytransfer.proto
 ```
 
 ---
@@ -117,25 +122,35 @@ easytransfer/
 ## 2. 模块依赖关系
 
 ```
-依赖方向：箭头表示"依赖于"
-
-cli
- ├──→ discovery
- ├──→ scanner ──→ core
- ├──→ planner ──→ core
- │      └──→ AI API (Claude)
- ├──→ transfer ──→ core, security
- ├──→ executor ──→ core, transfer
- └──→ report ──→ core
-
-security ──→ core（基础层，被多个模块依赖）
+                    ┌─────────────┐
+                    │   mcp/      │  MCP 协议层（Agent 调用入口）
+                    │   cli.py    │  CLI 入口
+                    └──────┬──────┘
+                           │ 调用
+          ┌────────────────┼────────────────┐
+          ▼                ▼                ▼
+    ┌──────────┐    ┌──────────┐    ┌──────────┐
+    │ scanner/ │    │ packager/│    │ executor/│
+    └─────┬────┘    └─────┬────┘    └─────┬────┘
+          │               │               │
+          ▼               ▼               ▼
+    ┌──────────┐    ┌──────────┐    ┌──────────┐
+    │ planner/ │    │transfer/ │    │ report/  │
+    └─────┬────┘    └─────┬────┘    └─────┬────┘
+          │               │               │
+          └───────────────┼───────────────┘
+                          ▼
+                   ┌──────────────┐
+                   │   core/      │  数据模型、配置、日志、异常
+                   ├──────────────┤
+                   │  security/   │  加密、密钥派生
+                   └──────────────┘
 ```
 
 **依赖规则**：
-- `core` 是基础层，不依赖任何其他业务模块
-- `security` 只依赖 `core`
-- 其他模块可以依赖 `core` 和 `security`，但业务模块之间尽量不互相依赖
-- `cli` 是顶层协调者，可以依赖所有模块
+- `core` 和 `security` 是基础层，不依赖任何业务模块
+- 业务模块之间尽量不互相依赖
+- `mcp/` 和 `cli.py` 是顶层入口，可以调用所有业务模块
 
 ---
 
@@ -143,121 +158,105 @@ security ──→ core（基础层，被多个模块依赖）
 
 | 需求 | 选型 | 理由 |
 |------|------|------|
-| 编程语言 | Python 3.11+ | 开发效率高，AI 生态好，Windows 兼容好 |
+| 编程语言 | Python 3.11+ | 开发效率高，AI/MCP 生态好 |
 | 包管理 | Poetry | 现代 Python 项目标准 |
-| AI 能力 | Claude API (Anthropic SDK) | 强推理能力，适合复杂决策 |
-| Agent 间通信 | gRPC | 强类型、高性能、支持双向流 |
-| 设备发现 | zeroconf (Python库) | 成熟的 mDNS 实现 |
-| 加密 | cryptography (Python库) | 工业级加密库 |
-| 命令行界面 | rich + typer | 美观的 CLI 输出 + 优雅的命令行参数解析 |
-| Windows 注册表 | winreg (标准库) | Python 自带，无需额外依赖 |
-| 异步 | asyncio | Python 原生异步，适合 IO 密集的迁移任务 |
+| MCP 框架 | mcp (Python SDK) | Anthropic 官方 MCP SDK |
+| 加密 | cryptography | 工业级加密库 |
+| CLI 界面 | rich + typer | 美观的终端输出 |
+| Windows 注册表 | winreg (标准库) | 无需额外依赖 |
+| 异步 | asyncio | IO 密集任务的最佳选择 |
 | 测试 | pytest + pytest-asyncio | Python 测试标准 |
+| 打包恢复器 | PyInstaller | 生成单文件 .exe |
 | 文件哈希 | hashlib (标准库) | SHA-256 校验 |
 
 ---
 
-## 4. 核心流程的状态机
+## 4. 数据流
 
-### 4.1 整体迁移状态
-
-```
-                    ┌─────────────┐
-                    │    IDLE     │  初始状态
-                    └──────┬──────┘
-                           │ 启动
-                    ┌──────▼──────┐
-                    │  DISCOVERING │  发现对端
-                    └──────┬──────┘
-                           │ 配对成功
-                    ┌──────▼──────┐
-                    │   SCANNING  │  扫描旧电脑环境
-                    └──────┬──────┘
-                           │ 扫描完成
-                    ┌──────▼──────┐
-                    │  PLANNING   │  AI 生成迁移计划
-                    └──────┬──────┘
-                           │ 用户确认计划
-                    ┌──────▼──────┐
-                    │  MIGRATING  │  执行迁移
-                    └──────┬──────┘
-                           │ 迁移完成
-                    ┌──────▼──────┐
-                    │  COMPLETED  │  生成报告
-                    └─────────────┘
-
-任何阶段都可以转到：
-  → PAUSED（暂停，可恢复）
-  → CANCELLED（取消，可回滚）
-  → ERROR（错误，等待用户决策）
-```
-
-### 4.2 单个 MigrationItem 的状态
+### 4.1 迁移码模式（MVP）
 
 ```
-PENDING → APPROVED → RUNNING → SUCCESS
-                        │
-                        ├──→ RETRYING → RUNNING
-                        │
-                        └──→ FAILED
+旧电脑                                                 新电脑
 
-PENDING → REJECTED → SKIPPED
+[1] Agent 调用 scan_environment
+         │
+         ▼
+    扫描所有 Scanner
+         │
+         ▼
+    生成 EnvironmentProfile (JSON)
+         │
+[2] Agent 调用 analyze_migration
+         │
+         ▼
+    分析并展示给用户
+    用户确认迁移选项
+         │
+[3] Agent 调用 create_migration_package
+         │
+         ▼
+    收集文件和配置
+    生成 install_plan.json
+    打包为 tar.gz
+    生成迁移码 → 派生密钥 → AES-256 加密
+    上传到中转服务器
+         │
+         ▼
+    返回迁移码给用户
+    用户将迁移码告诉新电脑
+                                              [4] 输入迁移码
+                                                   │
+                                                   ▼
+                                              下载加密迁移包
+                                              迁移码 → 派生密钥 → 解密
+                                                   │
+                                                   ▼
+                                              读取 install_plan.json
+                                              执行恢复：
+                                                - winget install 应用
+                                                - 复制配置文件
+                                                - 复制用户文件
+                                                - 设置环境变量
+                                                   │
+                                              [5] 验证每个步骤
+                                                   │
+                                                   ▼
+                                              生成迁移结果报告
 ```
 
----
+### 4.2 核心状态机
 
-## 5. Agent 通信协议概要
-
-源端和目标端 Agent 之间的通信消息类型：
-
-```protobuf
-// 核心消息类型（简化版，详见 proto/easytransfer.proto）
-
-// 配对请求
-message PairRequest { string pairing_code = 1; }
-
-// 环境画像传输
-message ProfileTransfer { EnvironmentProfile profile = 1; }
-
-// 迁移计划传输
-message PlanTransfer { MigrationPlan plan = 1; }
-
-// 迁移控制命令
-message MigrationCommand {
-  enum Type { START, PAUSE, RESUME, CANCEL, SKIP_ITEM }
-  Type type = 1;
-  string item_id = 2;  // 可选，指定具体项
-}
-
-// 进度更新
-message ProgressUpdate {
-  string item_id = 1;
-  string status = 2;
-  float percent = 3;
-  string message = 4;
-}
-
-// 文件传输请求
-message FileRequest { string file_path = 1; int64 offset = 2; }
-message FileChunk { bytes data = 1; string hash = 2; bool is_last = 3; }
+```
+IDLE → SCANNING → ANALYZED → PACKAGING → PACKAGED
+                                            │
+                    ┌───────────────────────┘
+                    ▼  （切换到新电脑）
+                DOWNLOADING → RESTORING → VERIFYING → COMPLETED
+                                 │
+                                 ├→ PARTIALLY_COMPLETED（部分失败）
+                                 └→ FAILED（严重错误）
 ```
 
 ---
 
-## 6. 性能考虑
+## 5. 性能考虑
 
-### 6.1 内存管理
-- 文件传输使用流式处理，不将整个文件加载到内存
-- 大目录扫描使用生成器（generator），避免一次性加载所有文件信息
-- 环境画像序列化后通常 < 10MB，可以安全地在内存中操作
+### 5.1 扫描性能
+- 文件系统扫描使用 `os.scandir()`（比 `os.listdir()` 快）
+- 大目录扫描使用生成器，避免一次性加载
+- 多个 Scanner 可以并行执行
 
-### 6.2 并发策略
-- 文件扫描：使用 asyncio + ThreadPoolExecutor（因为文件IO是阻塞的）
-- 文件传输：支持多文件并行传输（默认 4 个并行流）
-- 应用安装：串行执行（避免安装冲突）
-- AI API 调用：带超时和重试机制
+### 5.2 打包性能
+- 使用流式压缩，不将整个包加载到内存
+- 跳过不需要的目录（node_modules, .venv, __pycache__ 等）
+- 小文件合并后压缩效率更高
 
-### 6.3 AI API 使用优化
-- 尽量批量发送信息给 AI（不要一个应用一个应用地问）
-- 缓存常见应用的迁移策略（减少 API 调用）
-- 本地规则处理简单情况，只有复杂决策才调用 AI
+### 5.3 传输性能
+- 大文件分块上传/下载（每块 10MB）
+- 支持断点续传
+- 并行上传多个块
+
+### 5.4 恢复性能
+- 多个不冲突的应用可以并行安装（默认串行，因为 winget 有锁）
+- 文件恢复和应用安装可以并行
+- 配置恢复在对应应用安装完成后立即执行
