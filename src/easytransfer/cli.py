@@ -126,6 +126,88 @@ def scan(
 
 
 @app.command()
+def analyze(
+    profile_path: str = typer.Option(..., "--profile", "-p", help="环境画像 JSON 文件路径"),
+    show_details: bool = typer.Option(False, "--details", "-d", help="显示每个应用的详细分析"),
+) -> None:
+    """分析迁移可行性。
+
+    读取环境画像文件，分析哪些应用可以自动迁移、
+    哪些需要手动处理，并给出迁移建议。
+    """
+    import asyncio
+
+    from easytransfer.planner.analyzer import analyze_from_file
+
+    console.print(f"\n[bold blue]{APP_NAME}[/] — 正在分析迁移可行性...\n")
+
+    try:
+        analysis = asyncio.run(analyze_from_file(profile_path))
+    except Exception as e:
+        console.print(f"[red]分析失败: {e}[/]")
+        raise typer.Exit(1)
+
+    # 总览表格
+    table = Table(title="迁移分析总览")
+    table.add_column("项目", style="cyan")
+    table.add_column("数值", justify="right", style="green")
+
+    table.add_row("应用总数", str(analysis.total_apps))
+    table.add_row("可自动安装", f"[green]{analysis.auto_installable_apps}[/]")
+    table.add_row("需手动安装", f"[yellow]{analysis.manual_install_apps}[/]")
+    not_available = analysis.total_apps - analysis.auto_installable_apps - analysis.manual_install_apps
+    table.add_row("未识别", f"[red]{not_available}[/]")
+
+    data_gb = analysis.total_data_size_bytes / (1024**3)
+    table.add_row("总数据量", f"{data_gb:.1f} GB")
+    table.add_row("预计迁移时间", f"{analysis.estimated_time_minutes} 分钟")
+
+    console.print(table)
+
+    # 详细信息
+    if show_details and analysis.app_details:
+        detail_table = Table(title="\n应用详情")
+        detail_table.add_column("应用", style="cyan")
+        detail_table.add_column("版本", style="dim")
+        detail_table.add_column("分类", justify="center")
+        detail_table.add_column("方式", style="dim")
+        detail_table.add_column("备注")
+
+        for d in analysis.app_details:
+            cat = d.get("category", "")
+            if cat == "auto_installable":
+                cat_display = "[green]自动[/]"
+            elif cat == "manual_install":
+                cat_display = "[yellow]手动[/]"
+            else:
+                cat_display = "[red]未识别[/]"
+
+            detail_table.add_row(
+                d.get("name", ""),
+                d.get("version", ""),
+                cat_display,
+                d.get("strategy", ""),
+                d.get("notes", "")[:50],
+            )
+
+        console.print(detail_table)
+
+    # 建议
+    if analysis.recommendations:
+        console.print("\n[bold]建议:[/]")
+        for rec in analysis.recommendations:
+            console.print(f"  [green]>[/] {rec}")
+
+    # 警告
+    if analysis.warnings:
+        console.print("\n[bold yellow]警告:[/]")
+        for warn in analysis.warnings:
+            console.print(f"  [yellow]![/] {warn}")
+
+    console.print()
+
+
+@app.command()
 def package(
     profile: Optional[str] = typer.Option(None, "--profile", "-p", help="环境画像文件路径"),
     output: Optional[str] = typer.Option(None, "--output", "-o", help="迁移包保存路径"),

@@ -63,13 +63,15 @@ class TestHandleToolCall:
         assert "apps" in data
 
     @pytest.mark.asyncio
-    async def test_analyze_migration_returns_json(self):
+    async def test_analyze_migration_returns_json(self, sample_profile_path):
         result = await handle_tool_call(
-            "analyze_migration", {"profile_path": "/tmp/test.json"}
+            "analyze_migration", {"profile_path": str(sample_profile_path)}
         )
         data = json.loads(result)
         assert data["status"] == "success"
         assert "analysis" in data
+        assert "recommendations" in data
+        assert "app_details" in data
 
     @pytest.mark.asyncio
     async def test_create_package_returns_migration_code(self):

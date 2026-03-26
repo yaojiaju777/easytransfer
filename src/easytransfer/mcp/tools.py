@@ -1,7 +1,8 @@
 """MCP 工具定义。
 
-定义 6 个暴露给 Agent 的工具。当前阶段（M1）所有工具返回 mock 数据，
-后续里程碑会逐步替换为真实逻辑。
+定义 6 个暴露给 Agent 的工具。
+已实现: scan_environment (M2), analyze_migration (M3)。
+其余工具返回 mock 数据，后续里程碑逐步替换。
 
 工具列表：
 1. scan_environment — 扫描当前电脑环境
@@ -294,28 +295,30 @@ async def _handle_scan_environment(arguments: dict) -> dict:
 
 
 @_register_handler("analyze_migration")
-async def _mock_analyze_migration(arguments: dict) -> dict:
-    """[Mock] 分析迁移 — 返回示例分析结果。"""
+async def _handle_analyze_migration(arguments: dict) -> dict:
+    """分析迁移 — 调用真实分析逻辑。"""
+    from easytransfer.planner.analyzer import analyze_from_file
+
     profile_path = arguments.get("profile_path", "")
-    logger.info("[Mock] 分析迁移画像: %s", profile_path)
+    logger.info("分析迁移画像: %s", profile_path)
+
+    analysis = await analyze_from_file(profile_path)
 
     return {
         "status": "success",
-        "message": "[Mock] 迁移分析完成",
+        "message": "迁移分析完成",
         "analysis": {
-            "total_apps": 25,
-            "auto_installable": 18,
-            "manual_install": 5,
-            "not_available": 2,
-            "total_data_size_gb": 15.3,
-            "estimated_time_minutes": 45,
+            "profile_id": analysis.profile_id,
+            "total_apps": analysis.total_apps,
+            "auto_installable": analysis.auto_installable_apps,
+            "manual_install": analysis.manual_install_apps,
+            "not_available": analysis.total_apps - analysis.auto_installable_apps - analysis.manual_install_apps,
+            "total_data_size_gb": round(analysis.total_data_size_bytes / (1024**3), 1),
+            "estimated_time_minutes": analysis.estimated_time_minutes,
         },
-        "recommendations": [
-            "建议优先迁移开发环境配置（VS Code, Git, SSH）",
-            "Chrome 浏览器数据建议通过 Google 账号同步",
-            "发现 2 个应用已停止更新，建议在新电脑上使用替代品",
-        ],
-        "note": "这是 Mock 数据，真实分析功能将在 M3 阶段实现。",
+        "recommendations": analysis.recommendations,
+        "warnings": analysis.warnings,
+        "app_details": analysis.app_details[:50],  # 最多返回 50 个
     }
 
 
