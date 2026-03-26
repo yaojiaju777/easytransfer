@@ -1,29 +1,28 @@
-[tool.poetry]
+[project]
 name = "easytransfer"
 version = "0.1.0"
-description = "AI-powered Windows PC migration tool — one-click transfer from old PC to new PC"
-authors = ["EasyTransfer Team"]
-readme = "README.md"
-packages = [{include = "easytransfer", from = "src"}]
+description = "AI-powered Windows PC migration skill (MCP Server) — one-click transfer from old PC to new PC"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.0.0",
+    "cryptography>=42.0.0",
+    "rich>=13.7.0",
+    "typer>=0.9.0",
+]
 
-[tool.poetry.dependencies]
-python = "^3.11"
-anthropic = "^0.40.0"
-grpcio = "^1.60.0"
-grpcio-tools = "^1.60.0"
-zeroconf = "^0.130.0"
-cryptography = "^42.0.0"
-rich = "^13.7.0"
-typer = "^0.9.0"
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.2.0",
+]
 
-[tool.poetry.group.dev.dependencies]
-pytest = "^8.0.0"
-pytest-asyncio = "^0.23.0"
-pytest-cov = "^4.1.0"
-ruff = "^0.2.0"
-
-[tool.poetry.scripts]
+[project.scripts]
 easytransfer = "easytransfer.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -34,5 +33,5 @@ line-length = 100
 target-version = "py311"
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
