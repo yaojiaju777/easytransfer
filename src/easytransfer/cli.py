@@ -65,31 +65,64 @@ def scan(
     扫描已安装应用、用户文件、浏览器数据、开发环境等，
     生成完整的环境画像。
     """
-    console.print(
-        Panel(
-            f"[bold]环境扫描[/]\n\n"
-            f"扫描范围: {scope}\n"
-            f"输出文件: {output or '（仅显示，不保存）'}\n\n"
-            f"[dim]此功能将在 M2 阶段实现。当前显示 Mock 信息。[/]",
-            title=f"{APP_NAME} — 扫描",
-            border_style="blue",
-        )
-    )
+    import asyncio
+    from pathlib import Path
 
-    # Mock 扫描结果展示
-    table = Table(title="扫描结果预览 (Mock)")
+    from easytransfer.core.models import ScanScope
+    from easytransfer.scanner.orchestrator import run_full_scan, save_profile
+
+    console.print(f"\n[bold blue]{APP_NAME}[/] — 正在扫描环境 (scope={scope})...\n")
+
+    try:
+        scan_scope = ScanScope(scope)
+    except ValueError:
+        console.print(f"[red]无效的扫描范围: {scope}[/]")
+        raise typer.Exit(1)
+
+    profile = asyncio.run(run_full_scan(scope=scan_scope))
+
+    # 显示结果表格
+    table = Table(title="扫描结果")
     table.add_column("类别", style="cyan")
     table.add_column("数量", justify="right", style="green")
     table.add_column("大小", justify="right")
 
-    table.add_row("已安装应用", "25", "8.5 GB")
-    table.add_row("用户文件", "1,234 个", "5.2 GB")
-    table.add_row("浏览器数据", "2 个浏览器", "350 MB")
-    table.add_row("开发环境", "3 个运行时", "1.2 GB")
-    table.add_row("系统配置", "15 项", "< 1 MB")
+    def _fmt_size(b: int) -> str:
+        if b >= 1024**3:
+            return f"{b / 1024**3:.1f} GB"
+        if b >= 1024**2:
+            return f"{b / 1024**2:.0f} MB"
+        return f"{b / 1024:.0f} KB"
+
+    apps_size = sum(a.size_bytes for a in profile.installed_apps)
+    files_size = sum(fg.total_size_bytes for fg in profile.user_files)
+    browser_size = sum(bp.data_size_bytes for bp in profile.browser_profiles)
+
+    table.add_row("已安装应用", str(len(profile.installed_apps)), _fmt_size(apps_size))
+    table.add_row("应用配置", str(len(profile.app_configs)), "-")
+    table.add_row("用户文件组", str(len(profile.user_files)), _fmt_size(files_size))
+    table.add_row("浏览器", str(len(profile.browser_profiles)), _fmt_size(browser_size))
+    table.add_row("开发环境", str(len(profile.dev_environments)), "-")
+    table.add_row("凭证/密钥", str(len(profile.credentials)), "-")
+    table.add_row("[bold]总计[/]", "", f"[bold]{_fmt_size(profile.total_size_bytes)}[/]")
 
     console.print(table)
-    console.print("\n[dim]提示: 真实扫描功能即将在下一个版本实现[/]")
+
+    # 显示部分应用列表
+    if profile.installed_apps:
+        console.print(f"\n[bold]已安装应用（前 15 个）:[/]")
+        for app in profile.installed_apps[:15]:
+            auto = "[green]✓ winget[/]" if app.can_auto_install else "[dim]手动[/]"
+            console.print(f"  {app.name} {app.version} — {auto}")
+        if len(profile.installed_apps) > 15:
+            console.print(f"  [dim]...还有 {len(profile.installed_apps) - 15} 个[/]")
+
+    # 保存到文件
+    if output:
+        save_profile(profile, Path(output))
+        console.print(f"\n[green]环境画像已保存: {output}[/]")
+    else:
+        console.print(f"\n[dim]提示: 使用 --output profile.json 保存扫描结果[/]")
 
 
 @app.command()

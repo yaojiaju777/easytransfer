@@ -244,29 +244,52 @@ async def handle_tool_call(name: str, arguments: dict) -> str:
 
 
 # ============================================================
-# Mock 工具实现（M1 阶段，后续替换为真实逻辑）
+# 工具实现
 # ============================================================
 
 
 @_register_handler("scan_environment")
-async def _mock_scan_environment(arguments: dict) -> dict:
-    """[Mock] 扫描环境 — 返回示例数据。"""
-    scope = arguments.get("scope", "full")
-    logger.info("[Mock] 扫描环境，范围: %s", scope)
+async def _handle_scan_environment(arguments: dict) -> dict:
+    """扫描环境 — 调用真实扫描逻辑。"""
+    from dataclasses import asdict
+
+    from easytransfer.core.models import ScanScope
+    from easytransfer.scanner.orchestrator import run_full_scan
+
+    scope_str = arguments.get("scope", "full")
+    scope = ScanScope(scope_str)
+
+    profile = await run_full_scan(
+        scope=scope,
+        skip_system_apps=arguments.get("skip_system_apps", True),
+        include_file_sizes=arguments.get("include_file_sizes", True),
+    )
 
     return {
         "status": "success",
-        "message": f"[Mock] 环境扫描完成 (scope={scope})",
-        "profile_id": "mock-001",
-        "scan_time": datetime.now().isoformat(),
-        "summary": {
-            "installed_apps": 25,
-            "user_file_groups": 4,
-            "browser_profiles": 2,
-            "dev_environments": 3,
-            "total_size_gb": 15.3,
+        "message": f"环境扫描完成 (scope={scope_str})",
+        "profile_id": profile.profile_id,
+        "scan_time": profile.scan_time.isoformat(),
+        "system": {
+            "hostname": profile.system_info.hostname,
+            "os": profile.system_info.os_name,
+            "cpu": profile.system_info.cpu,
+            "memory_gb": profile.system_info.total_memory_gb,
+            "disk_free_gb": profile.system_info.disk_free_gb,
         },
-        "note": "这是 Mock 数据，真实扫描功能将在 M2 阶段实现。",
+        "summary": {
+            "installed_apps": len(profile.installed_apps),
+            "app_configs": len(profile.app_configs),
+            "user_file_groups": len(profile.user_files),
+            "browser_profiles": len(profile.browser_profiles),
+            "dev_environments": len(profile.dev_environments),
+            "credentials": len(profile.credentials),
+            "total_size_gb": round(profile.total_size_bytes / (1024**3), 1),
+        },
+        "apps": [
+            {"name": a.name, "version": a.version, "auto_install": a.can_auto_install}
+            for a in profile.installed_apps[:50]  # 最多返回 50 个
+        ],
     }
 
 

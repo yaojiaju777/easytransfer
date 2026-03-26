@@ -23,11 +23,14 @@ class TestCLI:
     def test_scan_command(self):
         result = runner.invoke(app, ["scan"])
         assert result.exit_code == 0
-        assert "扫描" in result.output or "Mock" in result.output
 
     def test_scan_with_scope(self):
         result = runner.invoke(app, ["scan", "--scope", "apps_only"])
         assert result.exit_code == 0
+
+    def test_scan_invalid_scope(self):
+        result = runner.invoke(app, ["scan", "--scope", "invalid"])
+        assert result.exit_code == 1
 
     def test_package_command(self):
         result = runner.invoke(app, ["package"])

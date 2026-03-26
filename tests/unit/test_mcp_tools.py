@@ -60,6 +60,7 @@ class TestHandleToolCall:
         data = json.loads(result)
         assert data["status"] == "success"
         assert "summary" in data
+        assert "apps" in data
 
     @pytest.mark.asyncio
     async def test_analyze_migration_returns_json(self):
