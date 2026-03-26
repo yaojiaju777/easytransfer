@@ -74,14 +74,20 @@ class TestHandleToolCall:
         assert "app_details" in data
 
     @pytest.mark.asyncio
-    async def test_create_package_returns_migration_code(self):
+    async def test_create_package_returns_migration_code(self, sample_profile_path, tmp_dir):
+        output_path = str(tmp_dir / "test_pkg.etpkg")
         result = await handle_tool_call(
             "create_migration_package",
-            {"profile_path": "/tmp/test.json", "output_mode": "local"},
+            {
+                "profile_path": str(sample_profile_path),
+                "output_mode": "local",
+                "output_path": output_path,
+            },
         )
         data = json.loads(result)
         assert data["status"] == "success"
         assert "migration_code" in data["package_info"]
+        assert len(data["package_info"]["migration_code"]) == 6
 
     @pytest.mark.asyncio
     async def test_restore_returns_result(self):

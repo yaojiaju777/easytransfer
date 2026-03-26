@@ -323,23 +323,58 @@ async def _handle_analyze_migration(arguments: dict) -> dict:
 
 
 @_register_handler("create_migration_package")
-async def _mock_create_package(arguments: dict) -> dict:
-    """[Mock] 创建迁移包 — 返回示例打包结果。"""
-    logger.info("[Mock] 创建迁移包")
+async def _handle_create_package(arguments: dict) -> dict:
+    """创建迁移包 — 调用真实打包逻辑。"""
+    from pathlib import Path
+
+    from easytransfer.packager.packer import pack_migration
+    from easytransfer.planner.analyzer import analyze_from_file
+
+    profile_path = arguments.get("profile_path", "")
+    logger.info("创建迁移包: profile=%s", profile_path)
+
+    # 加载环境画像
+    from easytransfer.planner.analyzer import _dict_to_profile
+
+    path = Path(profile_path)
+    if not path.exists():
+        return {"status": "error", "message": f"环境画像文件不存在: {profile_path}"}
+
+    import json as _json
+
+    data = _json.loads(path.read_text(encoding="utf-8"))
+    profile = _dict_to_profile(data)
+
+    # 运行分析
+    from easytransfer.planner.analyzer import analyze_profile
+
+    analysis = await analyze_profile(profile)
+
+    # 打包
+    pkg_info = await pack_migration(
+        profile=profile,
+        analysis=analysis,
+        include_files=arguments.get("include_files", True),
+        include_browser=arguments.get("include_browser", True),
+        include_dev_env=arguments.get("include_dev_env", True),
+        include_credentials=arguments.get("include_credentials", False),
+        output_path=arguments.get("output_path"),
+        output_mode=arguments.get("output_mode", "local"),
+    )
 
     return {
         "status": "success",
-        "message": "[Mock] 迁移包创建完成",
+        "message": "迁移包创建完成",
         "package_info": {
-            "package_id": "pkg-mock-001",
-            "migration_code": "123456",
-            "package_size_mb": 1250,
-            "item_count": 45,
-            "storage_mode": arguments.get("output_mode", "local"),
-            "encryption": "AES-256-GCM",
-            "expires_in_hours": 24,
+            "package_id": pkg_info.package_id,
+            "migration_code": pkg_info.migration_code,
+            "package_size_mb": round(pkg_info.package_size_bytes / (1024 * 1024), 1),
+            "item_count": pkg_info.item_count,
+            "storage_mode": pkg_info.storage_mode.value,
+            "storage_path": pkg_info.storage_path,
+            "encryption": pkg_info.encryption_info,
+            "expires_at": pkg_info.expires_at.isoformat() if pkg_info.expires_at else None,
         },
-        "note": "这是 Mock 数据，真实打包功能将在 M4 阶段实现。",
     }
 
 

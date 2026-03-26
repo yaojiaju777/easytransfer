@@ -218,19 +218,78 @@ def package(
     将扫描到的环境数据打包为加密的迁移包，
     并生成 6 位迁移码。
     """
+    import asyncio
+    import json
+    from pathlib import Path
+
+    from easytransfer.packager.packer import pack_migration
+    from easytransfer.planner.analyzer import _dict_to_profile, analyze_profile
+
+    console.print(f"\n[bold blue]{APP_NAME}[/] — 正在打包迁移数据...\n")
+
+    if not profile:
+        console.print("[yellow]未指定环境画像文件，将先执行扫描...[/]\n")
+        from easytransfer.core.models import ScanScope
+        from easytransfer.scanner.orchestrator import run_full_scan, save_profile
+
+        env_profile = asyncio.run(run_full_scan(scope=ScanScope.FULL))
+
+        # 保存到临时位置
+        from easytransfer.core.config import APP_DIR
+
+        profile_path = APP_DIR / "latest_profile.json"
+        save_profile(env_profile, profile_path)
+        profile = str(profile_path)
+        console.print(f"[green]扫描完成，画像已保存: {profile}[/]\n")
+    else:
+        # 从文件加载
+        path = Path(profile)
+        if not path.exists():
+            console.print(f"[red]环境画像文件不存在: {profile}[/]")
+            raise typer.Exit(1)
+
+    # 加载画像
+    try:
+        data = json.loads(Path(profile).read_text(encoding="utf-8"))
+        env_profile = _dict_to_profile(data)
+    except Exception as e:
+        console.print(f"[red]无法加载环境画像: {e}[/]")
+        raise typer.Exit(1)
+
+    # 分析
+    analysis = asyncio.run(analyze_profile(env_profile))
+
+    # 打包
+    try:
+        pkg_info = asyncio.run(
+            pack_migration(
+                profile=env_profile,
+                analysis=analysis,
+                output_path=output,
+                output_mode=mode,
+            )
+        )
+    except Exception as e:
+        console.print(f"[red]打包失败: {e}[/]")
+        raise typer.Exit(1)
+
+    # 显示结果
+    size_mb = pkg_info.package_size_bytes / (1024 * 1024)
     console.print(
         Panel(
-            f"[bold]迁移打包[/]\n\n"
-            f"环境画像: {profile or '（将先执行扫描）'}\n"
-            f"存储方式: {mode}\n"
-            f"输出路径: {output or '（默认路径）'}\n\n"
-            f"[dim]此功能将在 M4 阶段实现。[/]",
-            title=f"{APP_NAME} — 打包",
-            border_style="yellow",
+            f"[bold green]打包完成![/]\n\n"
+            f"迁移码:  [bold cyan]{pkg_info.migration_code}[/]\n"
+            f"包大小:  {size_mb:.1f} MB\n"
+            f"项目数:  {pkg_info.item_count}\n"
+            f"保存位置: {pkg_info.storage_path}\n"
+            f"加密方式: {pkg_info.encryption_info}\n"
+            f"过期时间: {pkg_info.expires_at}",
+            title=f"{APP_NAME} — 打包结果",
+            border_style="green",
         )
     )
 
-    console.print("\n[bold green]迁移码: 123456[/] (Mock)")
+    console.print(f"\n[bold]请记住迁移码: [cyan]{pkg_info.migration_code}[/][/]")
     console.print("[dim]请将此迁移码告诉新电脑上的助手[/]")
 
 
