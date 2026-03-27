@@ -297,26 +297,114 @@ def package(
 def restore(
     code: Optional[str] = typer.Option(None, "--code", "-c", help="6 位迁移码"),
     package_path: Optional[str] = typer.Option(None, "--package", "-p", help="本地迁移包路径"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="干跑模式（仅模拟，不真正执行）"),
 ) -> None:
     """从迁移包恢复环境。
 
     在新电脑上运行，输入迁移码即可自动恢复
     旧电脑上的应用、配置和文件。
     """
+    import asyncio
+
     if not code and not package_path:
         console.print("[red]错误: 请提供迁移码 (--code) 或迁移包路径 (--package)[/]")
         raise typer.Exit(1)
 
     source = f"迁移码: {code}" if code else f"本地文件: {package_path}"
+    console.print(f"\n[bold blue]{APP_NAME}[/] — 正在恢复迁移包...\n")
+    console.print(f"数据来源: {source}")
+    if dry_run:
+        console.print("[yellow]干跑模式: 仅模拟，不真正执行[/]")
+    console.print()
+
+    try:
+        result = asyncio.run(
+            _run_restore(
+                code=code,
+                package_path=package_path,
+                dry_run=dry_run,
+            )
+        )
+    except Exception as e:
+        console.print(f"[red]恢复失败: {e}[/]")
+        raise typer.Exit(1)
+
+    # 显示结果
+    table = Table(title="恢复结果")
+    table.add_column("项目", style="cyan")
+    table.add_column("类型", style="dim")
+    table.add_column("状态", justify="center")
+    table.add_column("备注")
+
+    for item in result.items:
+        status_str = item.status.value
+        if item.status.value == "success":
+            status_display = "[green]成功[/]"
+        elif item.status.value == "failed":
+            status_display = "[red]失败[/]"
+        elif item.status.value == "skipped":
+            status_display = "[yellow]跳过[/]"
+        else:
+            status_display = status_str
+
+        table.add_row(
+            item.item_name,
+            item.item_type,
+            status_display,
+            item.error_message[:60] if item.error_message else "",
+        )
+
+    console.print(table)
+
     console.print(
         Panel(
-            f"[bold]迁移恢复[/]\n\n"
-            f"数据来源: {source}\n\n"
-            f"[dim]此功能将在 M5 阶段实现。[/]",
-            title=f"{APP_NAME} — 恢复",
-            border_style="green",
+            f"[bold]恢复{'完成' if result.status.value == 'completed' else '部分完成'}[/]\n\n"
+            f"总项目: {result.total_items}\n"
+            f"成功:   [green]{result.success_count}[/]\n"
+            f"失败:   [red]{result.failed_count}[/]\n"
+            f"跳过:   [yellow]{result.skipped_count}[/]\n"
+            f"迁移 ID: {result.migration_id}",
+            title=f"{APP_NAME} — 恢复结果",
+            border_style="green" if result.failed_count == 0 else "yellow",
         )
     )
+
+    if result.manual_actions:
+        console.print("\n[bold yellow]需要手动操作:[/]")
+        for action in result.manual_actions:
+            console.print(f"  [yellow]![/] {action}")
+
+
+async def _run_restore(
+    code: str | None,
+    package_path: str | None,
+    dry_run: bool,
+):
+    """执行恢复逻辑。"""
+    from easytransfer.executor.engine import MigrationExecutor
+    from easytransfer.mcp.tools import _build_plan_from_unpack, _save_migration_result
+    from easytransfer.packager.unpacker import unpack_migration
+
+    if not package_path:
+        raise ValueError("目前仅支持本地迁移包恢复 (需提供 --package)")
+
+    unpack_result = await unpack_migration(
+        package_path=package_path,
+        migration_code=code or "000000",
+    )
+
+    plan = _build_plan_from_unpack(unpack_result)
+
+    executor = MigrationExecutor(
+        extract_dir=unpack_result.extract_dir,
+        plan=plan,
+        dry_run=dry_run,
+    )
+    result = await executor.execute()
+
+    _save_migration_result(result)
+
+    return result
 
 
 @app.command()
@@ -327,13 +415,60 @@ def verify(
 
     检查应用安装状态、配置恢复情况和文件完整性。
     """
+    import asyncio
+
+    from easytransfer.executor.verifier import MigrationVerifier
+    from easytransfer.mcp.tools import _load_migration_result
+
+    console.print(f"\n[bold blue]{APP_NAME}[/] — 正在验证迁移结果...\n")
+
+    mid = migration_id or "latest"
+    migration_result = _load_migration_result(mid)
+    if migration_result is None:
+        console.print(f"[red]找不到迁移记录: {mid}[/]")
+        console.print("[dim]提示: 请先运行 restore 命令，或指定 --id[/]")
+        raise typer.Exit(1)
+
+    try:
+        verifier = MigrationVerifier()
+        report = asyncio.run(verifier.verify(migration_result))
+    except Exception as e:
+        console.print(f"[red]验证失败: {e}[/]")
+        raise typer.Exit(1)
+
+    # 显示结果
+    table = Table(title="验证结果")
+    table.add_column("项目", style="cyan")
+    table.add_column("类型", style="dim")
+    table.add_column("状态", justify="center")
+    table.add_column("备注")
+
+    for detail in report.details:
+        status = detail.get("status", "")
+        if status == "passed":
+            status_display = "[green]通过[/]"
+        elif status == "failed":
+            status_display = "[red]失败[/]"
+        else:
+            status_display = f"[yellow]{status}[/]"
+
+        table.add_row(
+            detail.get("item_name", ""),
+            detail.get("item_type", ""),
+            status_display,
+            detail.get("note", "")[:60],
+        )
+
+    console.print(table)
+
     console.print(
         Panel(
-            f"[bold]迁移验证[/]\n\n"
-            f"迁移 ID: {migration_id or '（最近一次迁移）'}\n\n"
-            f"[dim]此功能将在 M5 阶段实现。[/]",
-            title=f"{APP_NAME} — 验证",
-            border_style="magenta",
+            f"[bold]验证完成[/]\n\n"
+            f"检查总数: {report.total_checked}\n"
+            f"通过:     [green]{report.passed}[/]\n"
+            f"失败:     [red]{report.failed}[/]",
+            title=f"{APP_NAME} — 验证报告",
+            border_style="green" if report.failed == 0 else "yellow",
         )
     )
 

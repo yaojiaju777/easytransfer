@@ -90,36 +90,50 @@ class TestHandleToolCall:
         assert len(data["package_info"]["migration_code"]) == 6
 
     @pytest.mark.asyncio
-    async def test_restore_returns_result(self):
+    async def test_restore_without_package_path(self):
+        """没有 package_path 的恢复请求应返回错误提示。"""
         result = await handle_tool_call(
             "restore_from_package", {"migration_code": "123456"}
         )
         data = json.loads(result)
-        assert data["status"] == "success"
-        assert data["result"]["total_items"] > 0
+        assert data["status"] == "error"
+        assert "package_path" in data["message"]
 
     @pytest.mark.asyncio
-    async def test_verify_returns_report(self):
+    async def test_restore_without_any_args(self):
+        """没有任何参数的恢复请求应返回错误。"""
         result = await handle_tool_call(
-            "verify_migration", {"migration_id": "mig-001"}
+            "restore_from_package", {}
         )
         data = json.loads(result)
-        assert data["status"] == "success"
-        assert data["verification"]["total_checked"] > 0
+        assert data["status"] == "error"
 
     @pytest.mark.asyncio
-    async def test_rollback_returns_result(self):
+    async def test_verify_nonexistent_migration(self):
+        """验证不存在的迁移记录应返回错误。"""
         result = await handle_tool_call(
-            "rollback_migration", {"migration_id": "mig-001"}
+            "verify_migration", {"migration_id": "nonexistent-id"}
         )
         data = json.loads(result)
-        assert data["status"] == "success"
+        assert data["status"] == "error"
+        assert "找不到" in data["message"]
 
     @pytest.mark.asyncio
-    async def test_rollback_with_specific_items(self):
+    async def test_rollback_nonexistent_migration(self):
+        """回滚不存在的迁移记录应返回错误。"""
+        result = await handle_tool_call(
+            "rollback_migration", {"migration_id": "nonexistent-id"}
+        )
+        data = json.loads(result)
+        assert data["status"] == "error"
+        assert "找不到" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_rollback_with_specific_items_nonexistent(self):
+        """回滚不存在的迁移记录应返回错误。"""
         result = await handle_tool_call(
             "rollback_migration",
-            {"migration_id": "mig-001", "item_ids": ["item-1", "item-2"]},
+            {"migration_id": "nonexistent-id", "item_ids": ["item-1", "item-2"]},
         )
         data = json.loads(result)
-        assert data["rollback"]["rolled_back_items"] == 2
+        assert data["status"] == "error"

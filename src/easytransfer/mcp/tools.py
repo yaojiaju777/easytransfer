@@ -379,68 +379,303 @@ async def _handle_create_package(arguments: dict) -> dict:
 
 
 @_register_handler("restore_from_package")
-async def _mock_restore(arguments: dict) -> dict:
-    """[Mock] 从迁移包恢复 — 返回示例恢复结果。"""
-    code = arguments.get("migration_code", "")
-    path = arguments.get("package_path", "")
-    logger.info("[Mock] 恢复迁移包, code=%s, path=%s", code, path)
+async def _handle_restore(arguments: dict) -> dict:
+    """从迁移包恢复 — 调用真实恢复逻辑。"""
+    from dataclasses import asdict
+    from pathlib import Path
 
-    return {
-        "status": "success",
-        "message": "[Mock] 迁移恢复完成",
-        "result": {
-            "migration_id": "mig-mock-001",
-            "total_items": 45,
-            "success": 42,
-            "failed": 2,
-            "skipped": 1,
-            "manual_actions": [
-                "请手动登录 Adobe Creative Cloud 以激活 Photoshop",
-                "请重新登录微信",
-            ],
-        },
-        "note": "这是 Mock 数据，真实恢复功能将在 M5 阶段实现。",
-    }
+    from easytransfer.executor.engine import MigrationExecutor
+    from easytransfer.packager.unpacker import unpack_migration
+    from easytransfer.planner.plan_builder import MigrationPlan, PlanAction, PlanGroup
+
+    code = arguments.get("migration_code", "")
+    package_path = arguments.get("package_path", "")
+    auto_install_apps = arguments.get("auto_install_apps", True)
+    restore_files = arguments.get("restore_files", True)
+    restore_configs = arguments.get("restore_configs", True)
+
+    if not code and not package_path:
+        return {"status": "error", "message": "请提供迁移码 (migration_code) 或迁移包路径 (package_path)"}
+
+    logger.info("恢复迁移包: code=%s, path=%s", code, package_path)
+
+    try:
+        # 解包
+        if package_path:
+            unpack_result = await unpack_migration(
+                package_path=package_path,
+                migration_code=code or "000000",
+            )
+        else:
+            return {"status": "error", "message": "目前仅支持本地迁移包恢复 (需提供 package_path)"}
+
+        # 构建迁移计划
+        plan = _build_plan_from_unpack(
+            unpack_result,
+            auto_install_apps=auto_install_apps,
+            restore_files=restore_files,
+            restore_configs=restore_configs,
+        )
+
+        # 执行
+        executor = MigrationExecutor(
+            extract_dir=unpack_result.extract_dir,
+            plan=plan,
+        )
+        result = await executor.execute()
+
+        # 持久化结果到临时文件（供 verify/rollback 使用）
+        _save_migration_result(result)
+
+        return {
+            "status": "success",
+            "message": "迁移恢复完成",
+            "result": {
+                "migration_id": result.migration_id,
+                "status": result.status.value,
+                "total_items": result.total_items,
+                "success": result.success_count,
+                "failed": result.failed_count,
+                "skipped": result.skipped_count,
+                "manual_actions": result.manual_actions,
+                "items": [
+                    {
+                        "item_id": item.item_id,
+                        "name": item.item_name,
+                        "type": item.item_type,
+                        "status": item.status.value,
+                        "error": item.error_message,
+                    }
+                    for item in result.items[:50]
+                ],
+            },
+        }
+
+    except Exception as e:
+        logger.error("恢复失败: %s", e)
+        return {"status": "error", "message": f"恢复失败: {e}"}
 
 
 @_register_handler("verify_migration")
-async def _mock_verify(arguments: dict) -> dict:
-    """[Mock] 验证迁移 — 返回示例验证结果。"""
-    migration_id = arguments.get("migration_id", "")
-    logger.info("[Mock] 验证迁移: %s", migration_id)
+async def _handle_verify(arguments: dict) -> dict:
+    """验证迁移结果 — 调用真实验证逻辑。"""
+    from easytransfer.executor.verifier import MigrationVerifier
 
-    return {
-        "status": "success",
-        "message": "[Mock] 验证完成",
-        "verification": {
-            "migration_id": migration_id,
-            "total_checked": 45,
-            "passed": 43,
-            "failed": 2,
-            "details": [
-                {"item": "VS Code", "status": "passed", "note": "应用和配置均正常"},
-                {"item": "Chrome", "status": "passed", "note": "书签和扩展已恢复"},
-                {"item": "Photoshop", "status": "failed", "note": "需要重新激活许可证"},
-            ],
-        },
-        "note": "这是 Mock 数据，真实验证功能将在 M5 阶段实现。",
-    }
+    migration_id = arguments.get("migration_id", "")
+    logger.info("验证迁移: %s", migration_id)
+
+    migration_result = _load_migration_result(migration_id)
+    if migration_result is None:
+        return {"status": "error", "message": f"找不到迁移记录: {migration_id}"}
+
+    try:
+        verifier = MigrationVerifier()
+        report = await verifier.verify(migration_result)
+
+        return {
+            "status": "success",
+            "message": "验证完成",
+            "verification": {
+                "migration_id": report.migration_id,
+                "total_checked": report.total_checked,
+                "passed": report.passed,
+                "failed": report.failed,
+                "details": report.details[:50],
+            },
+        }
+
+    except Exception as e:
+        logger.error("验证失败: %s", e)
+        return {"status": "error", "message": f"验证失败: {e}"}
 
 
 @_register_handler("rollback_migration")
-async def _mock_rollback(arguments: dict) -> dict:
-    """[Mock] 回滚迁移 — 返回示例回滚结果。"""
+async def _handle_rollback(arguments: dict) -> dict:
+    """回滚迁移 — 调用真实回滚逻辑。"""
+    from easytransfer.executor.rollback import RollbackExecutor
+
     migration_id = arguments.get("migration_id", "")
     item_ids = arguments.get("item_ids")
-    logger.info("[Mock] 回滚迁移: %s, items=%s", migration_id, item_ids)
+    logger.info("回滚迁移: %s, items=%s", migration_id, item_ids)
 
-    return {
-        "status": "success",
-        "message": "[Mock] 回滚完成",
-        "rollback": {
-            "migration_id": migration_id,
-            "rolled_back_items": len(item_ids) if item_ids else 45,
-            "failed_rollbacks": 0,
-        },
-        "note": "这是 Mock 数据，真实回滚功能将在 M6 阶段实现。",
-    }
+    migration_result = _load_migration_result(migration_id)
+    if migration_result is None:
+        return {"status": "error", "message": f"找不到迁移记录: {migration_id}"}
+
+    try:
+        executor = RollbackExecutor()
+        result = await executor.rollback(migration_result, item_ids)
+
+        return {
+            "status": "success",
+            "message": "回滚完成",
+            "rollback": {
+                "migration_id": result.migration_id,
+                "rolled_back_items": result.rolled_back_items,
+                "failed_rollbacks": result.failed_rollbacks,
+                "details": result.details[:50],
+            },
+        }
+
+    except Exception as e:
+        logger.error("回滚失败: %s", e)
+        return {"status": "error", "message": f"回滚失败: {e}"}
+
+
+# ============================================================
+# 辅助函数：迁移结果持久化
+# ============================================================
+
+
+def _build_plan_from_unpack(unpack_result, **kwargs) -> "MigrationPlan":
+    """从解包结果构建迁移计划。"""
+    from easytransfer.planner.plan_builder import MigrationPlan, PlanAction, PlanGroup
+
+    auto_install_apps = kwargs.get("auto_install_apps", True)
+    restore_files = kwargs.get("restore_files", True)
+    restore_configs = kwargs.get("restore_configs", True)
+
+    groups: list[PlanGroup] = []
+
+    # 如果有 install_plan.json，用它来构建计划
+    if unpack_result.install_plan:
+        plan_data = unpack_result.install_plan
+        for group_data in plan_data.get("groups", []):
+            group_type = group_data.get("group_type", "")
+
+            # 根据用户选项跳过某些组
+            if group_type == "app_install" and not auto_install_apps:
+                continue
+            if group_type == "file_copy" and not restore_files:
+                continue
+            if group_type == "config_restore" and not restore_configs:
+                continue
+
+            group = PlanGroup(
+                group_type=group_type,
+                group_name=group_data.get("group_name", ""),
+            )
+
+            for action_data in group_data.get("actions", []):
+                action = PlanAction(
+                    action_id=action_data.get("action_id", ""),
+                    action_type=action_data.get("action_type", ""),
+                    name=action_data.get("name", ""),
+                    description=action_data.get("description", ""),
+                    method=action_data.get("method", ""),
+                    command=action_data.get("command", ""),
+                    source_path=action_data.get("source_path", ""),
+                    target_path=action_data.get("target_path", ""),
+                    requires_user_action=action_data.get("requires_user_action", False),
+                    details=action_data.get("details", {}),
+                )
+                group.actions.append(action)
+
+            if group.actions:
+                groups.append(group)
+    else:
+        # 从 manifest 构建简单计划
+        manifest = unpack_result.manifest
+        apps = manifest.get("apps", [])
+
+        if auto_install_apps and apps:
+            app_group = PlanGroup(
+                group_type="app_install",
+                group_name="应用安装",
+            )
+            for app in apps:
+                if app.get("can_auto_install") and app.get("winget_id"):
+                    winget_id = app["winget_id"]
+                    action = PlanAction(
+                        action_type="app_install",
+                        name=app.get("name", ""),
+                        method="winget",
+                        command=f"winget install --id {winget_id} --accept-source-agreements --accept-package-agreements",
+                        details={"winget_id": winget_id},
+                    )
+                    app_group.actions.append(action)
+            if app_group.actions:
+                groups.append(app_group)
+
+    plan = MigrationPlan(
+        groups=groups,
+        total_actions=sum(len(g.actions) for g in groups),
+    )
+
+    return plan
+
+
+def _save_migration_result(result) -> None:
+    """持久化迁移结果到临时文件。"""
+    import json as _json
+    from dataclasses import asdict
+
+    from easytransfer.core.config import APP_DIR
+
+    results_dir = APP_DIR / "migration_results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    path = results_dir / f"{result.migration_id}.json"
+    data = asdict(result)
+    path.write_text(
+        _json.dumps(data, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+
+    # 也保存为 latest
+    latest_path = results_dir / "latest.json"
+    latest_path.write_text(
+        _json.dumps(data, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+
+
+def _load_migration_result(migration_id: str):
+    """从持久化文件加载迁移结果。"""
+    import json as _json
+
+    from easytransfer.core.config import APP_DIR
+    from easytransfer.core.models import (
+        MigrationItemResult,
+        MigrationItemStatus,
+        MigrationResult,
+        MigrationStatus,
+    )
+
+    results_dir = APP_DIR / "migration_results"
+
+    # 尝试精确 ID
+    path = results_dir / f"{migration_id}.json"
+    if not path.exists():
+        # 尝试 latest
+        path = results_dir / "latest.json"
+    if not path.exists():
+        return None
+
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    result = MigrationResult(
+        migration_id=data.get("migration_id", migration_id),
+        status=MigrationStatus(data.get("status", "idle")),
+        total_items=data.get("total_items", 0),
+        success_count=data.get("success_count", 0),
+        failed_count=data.get("failed_count", 0),
+        skipped_count=data.get("skipped_count", 0),
+        manual_actions=data.get("manual_actions", []),
+    )
+
+    for item_data in data.get("items", []):
+        item = MigrationItemResult(
+            item_id=item_data.get("item_id", ""),
+            item_type=item_data.get("item_type", ""),
+            item_name=item_data.get("item_name", ""),
+            status=MigrationItemStatus(item_data.get("status", "pending")),
+            error_message=item_data.get("error_message", ""),
+            rollback_info=item_data.get("rollback_info", ""),
+        )
+        result.items.append(item)
+
+    return result
